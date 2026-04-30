@@ -1,12 +1,12 @@
 import os
 import json
 import asyncio
+import threading
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from groq import Groq
 
 load_dotenv()
@@ -79,8 +79,6 @@ BOARD_MEMBERS = {
 # ============ SELF-LEARNING BRAIN ============
 
 class SelfLearningBrain:
-    """JA's brain that learns from every interaction"""
-
     def __init__(self):
         self.learnings_file = Path("learnings.md")
         self.skills_dir = Path("skills")
@@ -96,7 +94,6 @@ class SelfLearningBrain:
     def add_learning(self, situation, lesson, result):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         entry = f"\n## {timestamp}\n**Situation:** {situation}\n**Lesson:** {lesson}\n**Result:** {result}\n"
-
         with open(self.learnings_file, 'a') as f:
             f.write(entry)
 
@@ -105,11 +102,9 @@ class SelfLearningBrain:
 
 brain = SelfLearningBrain()
 
-# ============ AUTO-DISCOVERY SYSTEM ============
+# ============ AUTO-DISCOVERY ============
 
 class TechDiscovery:
-    """Discovers new technologies and creates skills automatically"""
-
     def __init__(self):
         self.discovered_file = Path("discovered_tech.json")
         self.known_tech = self.load_known()
@@ -191,11 +186,9 @@ JA found this but is waiting for Gaurav's permission to fully integrate.
 
 discovery = TechDiscovery()
 
-# ============ MEMORY SYSTEM (FILE-BASED) ============
+# ============ FILE MEMORY ============
 
 class FileMemory:
-    """Simple file-based memory system"""
-
     def __init__(self):
         self.memory_file = Path("memory.json")
         self.memory = self.load()
@@ -242,10 +235,37 @@ def search_web(query):
     except Exception as e:
         return f"Error: {str(e)}"
 
+# ============ TELEGRAM API FUNCTIONS ============
+
+def send_message(chat_id, text):
+    """Send message via Telegram HTTP API"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Error sending message: {e}")
+        return None
+
+def get_updates(offset=None):
+    """Get updates from Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+        params = {"offset": offset, "limit": 10} if offset else {"limit": 10}
+        response = requests.get(url, params=params, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Error getting updates: {e}")
+        return {"result": []}
+
 # ============ BOARD MEETING SYSTEM ============
 
 def ask_board_member(agent_key, idea, context=""):
-    """Ask a specific board member for their analysis"""
     agent = BOARD_MEMBERS[agent_key]
 
     search_query = f"{idea} market India 2026"
@@ -268,21 +288,11 @@ def ask_board_member(agent_key, idea, context=""):
         return f"Error: {str(e)}"
 
 def run_board_meeting(idea):
-    """Run full board meeting and return JA's final recommendation"""
-
-    # Step 1: Ravi researches
     ravi_analysis = ask_board_member("ravi", idea)
-
-    # Step 2: Priya analyzes
     priya_analysis = ask_board_member("priya", idea, context=ravi_analysis)
-
-    # Step 3: Vikram creates plan
     vikram_analysis = ask_board_member("vikram", idea, context=f"{ravi_analysis}\n\n{priya_analysis}")
-
-    # Step 4: Amit finds risks
     amit_analysis = ask_board_member("amit", idea, context=f"{ravi_analysis}\n\n{priya_analysis}\n\n{vikram_analysis}")
 
-    # Step 5: JA synthesizes
     final_prompt = f"""
 You are JA (Jarvis Autonomous), the Chairman of the Board. Your BOSS is Gaurav.
 You are LOYAL only to Gaurav. You NEVER spend money without his permission.
@@ -346,74 +356,25 @@ If investment > ₹0: "⚠️ REQUIRES BOSS APPROVAL"
     except Exception as e:
         return f"Error: {str(e)}"
 
-# ============ AUTONOMOUS LOOP ============
+# ============ MESSAGE HANDLER ============
 
-async def autonomous_loop():
-    """JA's 24/7 self-running loop"""
-    while True:
-        try:
-            now = datetime.now()
-
-            # Run every 2 hours
-            if now.hour % 2 == 0 and now.minute < 5:
-
-                # 1. Research new tech
-                new_techs = discovery.search_new_tech()
-
-                for tech in new_techs:
-                    skill_name = discovery.create_skill_from_discovery(tech)
-
-                    if BOSS_ID:
-                        message = f"""
-🤖 *Boss, new tech discovered!*
-
-*{tech['name']}*
-{tech['description'][:150]}
-
-Skill file created: `{skill_name}`
-Approval needed to integrate.
-
-Reply: "approve" or "ignore"
-"""
-                        requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                            json={"chat_id": BOSS_ID, "text": message, "parse_mode": "Markdown"}
-                        )
-
-                # 2. Daily market research
-                market_queries = [
-                    "fly ash brick price Lucknow today",
-                    "app monetization trends India 2026",
-                    "online money making opportunities India"
-                ]
-
-                for query in market_queries:
-                    results = search_web(query)
-                    memory.set(f"research_{now.strftime('%Y%m%d')}_{query[:20]}", results)
-
-                # 3. Self-reflection
-                brain.add_learning(
-                    situation="Daily autonomous review",
-                    lesson=f"Processed market research and tech discovery",
-                    result="Learning updated"
-                )
-
-            await asyncio.sleep(300)
-
-        except Exception as e:
-            print(f"Autonomous loop error: {e}")
-            await asyncio.sleep(300)
-
-# ============ TELEGRAM HANDLERS ============
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(text, chat_id):
+    """Handle incoming message"""
     global BOSS_ID
-    BOSS_ID = update.effective_user.id
 
-    memory.set("boss_id", str(BOSS_ID))
-    memory.set("first_meeting", datetime.now().isoformat())
+    if not BOSS_ID:
+        BOSS_ID = chat_id
+        memory.set("boss_id", str(BOSS_ID))
+        memory.set("first_meeting", datetime.now().isoformat())
 
-    welcome = """
+    text_lower = text.lower()
+
+    # Save to memory
+    memory.set(f"msg_{datetime.now().strftime('%H%M%S')}", text)
+
+    # Handle commands
+    if text_lower == '/start':
+        welcome = """
 🤖 *Welcome, Boss Gaurav.*
 
 I am **JA** — your Jarvis Autonomous Chairman.
@@ -443,82 +404,105 @@ Example: *"Should I start a YouTube channel?"*
 
 Ready when you are, Boss.
 """
-    await update.message.reply_text(welcome, parse_mode='Markdown')
-
-async def board_meeting_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text(
-            "❓ *What idea should the Board analyze?*\n\n"
-            "Example: `/board I want to start a driving school in Lucknow`",
-            parse_mode='Markdown'
-        )
+        send_message(chat_id, welcome)
         return
 
-    idea = " ".join(context.args)
+    if text_lower == '/status':
+        skills = list(Path('skills').iterdir())
+        learnings_count = len([l for l in brain.get_all_learnings().split('##') if l.strip()])
 
-    await update.message.reply_text(
-        f"🤖 *Calling Board Meeting for:*\n\n_{idea}_\n\n"
-        f"🔵 Ravi is researching...\n"
-        f"🟢 Priya is calculating...\n"
-        f"🟡 Vikram is planning...\n"
-        f"🔴 Amit is finding risks...\n\n"
-        f"⏳ *This takes 60-90 seconds. Please wait...*",
-        parse_mode='Markdown'
-    )
+        status_text = f"""
+🤖 *JA Autonomous Status*
 
-    try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, run_board_meeting, idea)
+🟢 *Status:* Online & Learning
+🧠 *Skills:* {len([s for s in skills if s.is_dir()])} loaded
+📚 *Learnings:* {learnings_count} lessons
+🔍 *Last Research:* {datetime.now().strftime('%H:%M')}
+⏰ *Next Check:* {(datetime.now() + timedelta(hours=2)).strftime('%H:%M')}
 
-        # Save to memory
-        memory.set(f"board_{datetime.now().strftime('%Y%m%d_%H%M')}", f"Idea: {idea}")
+*Auto-Discovery:* Active
+*Self-Learning:* Active
+*Boss Permission:* Required for major actions
 
-        # Learn from this
-        brain.add_learning(
-            situation=f"Board meeting for: {idea[:50]}",
-            lesson="Board debated and reached decision",
-            result="Recommendation delivered to Boss"
-        )
+Waiting for your command, Boss! 👀
+"""
+        send_message(chat_id, status_text)
+        return
 
-        await update.message.reply_text(result, parse_mode='Markdown')
+    if text_lower == '/learnings':
+        learnings_text = brain.get_all_learnings()[-3000:]
+        summary = f"""
+🧠 *JA's Learning Report*
 
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ *Board Meeting Error:*\n{str(e)}\n\n"
-            f"Please try again with a simpler idea.",
-            parse_mode='Markdown'
-        )
+*Total Lessons:* {len([l for l in learnings_text.split('##') if l.strip()])}
 
-async def task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Daily task with learning"""
-    learnings = brain.get_all_learnings()[-2000:]
+*Recent Wisdom:*
+{learnings_text[-1000:]}
 
-    messages = [
-        {"role": "system", "content": JA_CORE + f"\n\nMY LEARNINGS:\n{learnings}"},
-        {"role": "user", "content": "Boss wants today's money-making task. Give ONE specific task."}
-    ]
+I get better every day, Boss!
+"""
+        send_message(chat_id, summary)
+        return
 
-    try:
-        completion = client.chat.completions.create(
-            model="qwen-2.5-32b",
-            messages=messages,
-            temperature=0.3,
-            max_tokens=1500
-        )
-        response = completion.choices[0].message.content
-        await update.message.reply_text(response, parse_mode='Markdown')
+    if text_lower == '/task':
+        learnings = brain.get_all_learnings()[-2000:]
 
-        brain.add_learning(
-            situation="Boss asked for daily task",
-            lesson="Provided actionable task",
-            result="Task delivered"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
+        messages = [
+            {"role": "system", "content": JA_CORE + f"\n\nMY LEARNINGS:\n{learnings}"},
+            {"role": "user", "content": "Boss wants today's money-making task. Give ONE specific task."}
+        ]
 
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Approve pending skills"""
-    if not context.args:
+        try:
+            completion = client.chat.completions.create(
+                model="qwen-2.5-32b",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=1500
+            )
+            response = completion.choices[0].message.content
+            send_message(chat_id, response)
+
+            brain.add_learning(
+                situation="Boss asked for daily task",
+                lesson="Provided actionable task",
+                result="Task delivered"
+            )
+        except Exception as e:
+            send_message(chat_id, f"Error: {str(e)}")
+        return
+
+    if text_lower.startswith('/board '):
+        idea = text[7:].strip()
+
+        send_message(chat_id, f"""
+🤖 *Calling Board Meeting for:*
+
+_{idea}_
+
+🔵 Ravi is researching...
+🟢 Priya is calculating...
+🟡 Vikram is planning...
+🔴 Amit is finding risks...
+
+⏳ *This takes 60-90 seconds. Please wait...*
+""")
+
+        try:
+            result = run_board_meeting(idea)
+
+            memory.set(f"board_{datetime.now().strftime('%Y%m%d_%H%M')}", f"Idea: {idea}")
+            brain.add_learning(
+                situation=f"Board meeting for: {idea[:50]}",
+                lesson="Board debated and reached decision",
+                result="Recommendation delivered to Boss"
+            )
+
+            send_message(chat_id, result)
+        except Exception as e:
+            send_message(chat_id, f"❌ *Board Meeting Error:*\n{str(e)}")
+        return
+
+    if text_lower == '/approve':
         pending = []
         for skill_folder in Path('skills').iterdir():
             if skill_folder.is_dir():
@@ -534,83 +518,34 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "*✅ No pending skills!*"
 
-        await update.message.reply_text(text, parse_mode='Markdown')
+        send_message(chat_id, text)
         return
 
-    skill_name = context.args[0]
-    skill_file = Path(f"skills/{skill_name}/SKILL.md")
+    if text_lower.startswith('/approve '):
+        skill_name = text[9:].strip()
+        skill_file = Path(f"skills/{skill_name}/SKILL.md")
 
-    if skill_file.exists():
-        with open(skill_file, 'r') as f:
-            content = f.read()
+        if skill_file.exists():
+            with open(skill_file, 'r') as f:
+                content = f.read()
 
-        content = content.replace('pending_approval', 'approved')
-        content += f"\n\n## APPROVED\nApproved by Boss on: {datetime.now().isoformat()}\n"
+            content = content.replace('pending_approval', 'approved')
+            content += f"\n\n## APPROVED\nApproved by Boss on: {datetime.now().isoformat()}\n"
 
-        with open(skill_file, 'w') as f:
-            f.write(content)
+            with open(skill_file, 'w') as f:
+                f.write(content)
 
-        await update.message.reply_text(f"✅ *{skill_name}* approved! Now I can learn it.", parse_mode='Markdown')
+            send_message(chat_id, f"✅ *{skill_name}* approved! Now I can learn it.")
+            brain.add_learning(
+                situation=f"Boss approved skill: {skill_name}",
+                lesson="New capability added",
+                result=f"Skill {skill_name} activated"
+            )
+        else:
+            send_message(chat_id, "❌ Skill not found.")
+        return
 
-        brain.add_learning(
-            situation=f"Boss approved skill: {skill_name}",
-            lesson="New capability added",
-            result=f"Skill {skill_name} activated"
-        )
-    else:
-        await update.message.reply_text("❌ Skill not found.")
-
-async def learnings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show what JA has learned"""
-    learnings_text = brain.get_all_learnings()[-3000:]
-
-    summary = f"""
-🧠 *JA's Learning Report*
-
-*Total Lessons:* {len([l for l in learnings_text.split('##') if l.strip()])}
-
-*Recent Wisdom:*
-{learnings_text[-1000:]}
-
-I get better every day, Boss!
-"""
-    await update.message.reply_text(summary, parse_mode='Markdown')
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show JA's status"""
-    skills = list(Path('skills').iterdir())
-    learnings_count = len([l for l in brain.get_all_learnings().split('##') if l.strip()])
-
-    status_text = f"""
-🤖 *JA Autonomous Status*
-
-🟢 *Status:* Online & Learning
-🧠 *Skills:* {len([s for s in skills if s.is_dir()])} loaded
-📚 *Learnings:* {learnings_count} lessons
-🔍 *Last Research:* {datetime.now().strftime('%H:%M')}
-⏰ *Next Check:* {(datetime.now() + timedelta(hours=2)).strftime('%H:%M')}
-
-*Auto-Discovery:* Active
-*Self-Learning:* Active
-*Boss Permission:* Required for major actions
-
-Waiting for your command, Boss! 👀
-"""
-    await update.message.reply_text(status_text, parse_mode='Markdown')
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle any message"""
-    global BOSS_ID
-    if not BOSS_ID:
-        BOSS_ID = update.effective_user.id
-
-    text = update.message.text
-    text_lower = text.lower()
-
-    # Save to memory
-    memory.set(f"msg_{datetime.now().strftime('%H%M%S')}", text)
-
-    # Check for approval
+    # Check for approval words
     if any(word in text_lower for word in ['approve', 'yes', 'seekh lo', 'haan']):
         pending = []
         for skill_folder in Path('skills').iterdir():
@@ -632,25 +567,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(latest / 'SKILL.md', 'w') as f:
                 f.write(content)
 
-            await update.message.reply_text(f"✅ *{skill_name}* learned! I am now expert in this.", parse_mode='Markdown')
+            send_message(chat_id, f"✅ *{skill_name}* learned! I am now expert in this.")
             return
 
-    # Check for simple commands
+    # Simple commands
     if text_lower in ['execute', 'start', 'go']:
-        await update.message.reply_text(
-            "🚀 *Executing Day 1 plan...*\n\nVikram is preparing your task list.",
-            parse_mode='Markdown'
-        )
+        send_message(chat_id, "🚀 *Executing Day 1 plan...*\n\nVikram is preparing your task list.")
         return
 
     if text_lower in ['no', 'reject', 'next']:
-        await update.message.reply_text(
-            "❌ *Idea rejected.*\n\nTell me your next idea, Boss.",
-            parse_mode='Markdown'
-        )
+        send_message(chat_id, "❌ *Idea rejected.*\n\nTell me your next idea, Boss.")
         return
 
-    # Normal conversation with learning
+    # Normal conversation
     learnings = brain.get_all_learnings()[-1500:]
 
     messages = [
@@ -666,7 +595,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             max_tokens=2000
         )
         response = completion.choices[0].message.content
-        await update.message.reply_text(response, parse_mode='Markdown')
+        send_message(chat_id, response)
 
         brain.add_learning(
             situation=f"Boss said: {text[:100]}",
@@ -674,32 +603,134 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result="Interaction logged"
         )
     except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
+        send_message(chat_id, f"Error: {str(e)}")
 
-# ============ MAIN ============
+# ============ AUTONOMOUS LOOP ============
 
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+def autonomous_loop():
+    """JA's 24/7 self-running loop"""
+    while True:
+        try:
+            now = datetime.now()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("board", board_meeting_cmd))
-    application.add_handler(CommandHandler("task", task))
-    application.add_handler(CommandHandler("approve", approve))
-    application.add_handler(CommandHandler("learnings", learnings_cmd))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            if now.hour % 2 == 0 and now.minute < 5:
+                # Research new tech
+                new_techs = discovery.search_new_tech()
 
-    # Start autonomous loop
-    loop = asyncio.get_event_loop()
-    loop.create_task(autonomous_loop())
+                for tech in new_techs:
+                    skill_name = discovery.create_skill_from_discovery(tech)
 
+                    if BOSS_ID:
+                        message = f"""
+🤖 *Boss, new tech discovered!*
+
+*{tech['name']}*
+{tech['description'][:150]}
+
+Skill file created: `{skill_name}`
+Approval needed to integrate.
+
+Reply: "approve" or "ignore"
+"""
+                        send_message(BOSS_ID, message)
+
+                # Daily market research
+                market_queries = [
+                    "fly ash brick price Lucknow today",
+                    "app monetization trends India 2026",
+                    "online money making opportunities India"
+                ]
+
+                for query in market_queries:
+                    results = search_web(query)
+                    memory.set(f"research_{now.strftime('%Y%m%d')}_{query[:20]}", results)
+
+                # Self-reflection
+                brain.add_learning(
+                    situation="Daily autonomous review",
+                    lesson="Processed market research and tech discovery",
+                    result="Learning updated"
+                )
+
+            # Sleep for 5 minutes
+            import time
+            time.sleep(300)
+
+        except Exception as e:
+            print(f"Autonomous loop error: {e}")
+            import time
+            time.sleep(300)
+
+# ============ MAIN BOT LOOP ============
+
+def run_bot():
+    """Main bot loop using direct Telegram API"""
     print("🤖 JA ULTIMATE is running...")
     print("🧠 Board of Directors: ACTIVE")
     print("🔍 Auto-Discovery: ACTIVE")
     print("💾 Self-Learning: ACTIVE")
     print("👑 Boss: Gaurav")
 
-    application.run_polling()
+    offset = None
+
+    while True:
+        try:
+            updates = get_updates(offset)
+
+            if updates.get('result'):
+                for update in updates['result']:
+                    offset = update['update_id'] + 1
+
+                    if 'message' in update and 'text' in update['message']:
+                        text = update['message']['text']
+                        chat_id = update['message']['chat']['id']
+
+                        print(f"Received: {text} from {chat_id}")
+                        handle_message(text, chat_id)
+
+            # Small sleep to prevent flooding
+            import time
+            time.sleep(1)
+
+        except Exception as e:
+            print(f"Bot loop error: {e}")
+            import time
+            time.sleep(5)
+
+# ============ WEB SERVER FOR RENDER ============
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "status": "alive",
+            "learning": True,
+            "boss": "Gaurav",
+            "board": "active"
+        }).encode())
+
+    def log_message(self, format, *args):
+        pass  # Suppress logs
+
+def run_web_server():
+    """Run health check server for Render"""
+    port = int(os.environ.get('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    print(f"🌐 Health server running on port {port}")
+    server.serve_forever()
+
+# ============ MAIN ============
 
 if __name__ == '__main__':
-    main()
+    # Start autonomous loop in background thread
+    auto_thread = threading.Thread(target=autonomous_loop, daemon=True)
+    auto_thread.start()
+
+    # Start web server in background thread (for Render health checks)
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+
+    # Run bot in main thread
+    run_bot()
